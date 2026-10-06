@@ -19,7 +19,7 @@ button.primary{background:#ecece7;border-color:#aaa}.danger{color:#a33}
 .head{display:flex;justify-content:space-between;gap:8px;align-items:center}.name{font-weight:700;font-size:17px;word-break:break-word}
 .time{text-align:center;font-size:44px;font-weight:750;font-variant-numeric:tabular-nums;margin:15px 0 4px}
 .status{text-align:center;color:#777;font-size:13px;min-height:20px}.actions{display:flex;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:12px}
-.empty{text-align:center;color:#777;border:1px dashed #ccc;padding:22px;border-radius:14px;margin-top:14px}
+.empty{text-align:center;color:#777;border:1px dashed #ccc;padding:22px;border-radius:14px;margin-top:14px}.notice{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:20;display:none;background:#222;color:#fff;padding:14px 18px;border-radius:14px;box-shadow:0 6px 24px rgba(0,0,0,.18);font-size:16px;text-align:center;max-width:calc(100vw - 28px)}.notice.show{display:block}
 @media(max-width:560px){body{padding:14px}.setup{grid-template-columns:1fr 1fr 1fr}.add{grid-column:1/-1}.time{font-size:38px}}
 </style>
 </head>
@@ -33,20 +33,147 @@ button.primary{background:#ecece7;border-color:#aaa}.danger{color:#a33}
 <button id="add" class="primary add">＋新增計時器</button>
 </div>
 <div id="list" class="grid"></div>
-<div id="empty" class="empty">設定時間後，按「新增計時器」。<br>不同計時器可以同時倒數。</div>
+<div id="empty" class="empty">設定時間後，按「新增計時器」。<br>不同計時器可以同時倒數。</div><div id="notice" class="notice" role="status" aria-live="assertive"></div>
 </main>
 <script>
-(()=>{const $=s=>document.querySelector(s),list=$("#list"),empty=$("#empty"),name=$("#name"),min=$("#min"),sec=$("#sec");
-let timers=[],id=1,last=performance.now();
+(()=>{
+const $=s=>document.querySelector(s),
+list=$("#list"),empty=$("#empty"),name=$("#name"),min=$("#min"),sec=$("#sec"),notice=$("#notice");
+let timers=[],id=1,last=performance.now(),audioCtx=null,noticeTimer=null;
+
 const esc=s=>s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt=x=>{x=Math.max(0,Math.ceil(x));return String(Math.floor(x/60)).padStart(2,"0")+":"+String(x%60).padStart(2,"0")};
-function render(){empty.style.display=timers.length?"none":"block";list.innerHTML=timers.map(t=>`<article class="card" data-id="${t.id}"><div class="head"><div class="name">${esc(t.name)}</div><button class="danger remove">刪除</button></div><div class="time">${fmt(t.remaining)}</div><div class="status">${t.done?"時間到":t.running?"倒數中…":"已暫停"}</div><div class="actions"><button class="primary toggle">${t.running?"暫停":"開始"}</button><button class="reset">重設</button></div></article>`).join("")}
-function addTimer(){const m=Math.max(0,Math.min(999,Number(min.value)||0)),s=Math.max(0,Math.min(59,Number(sec.value)||0)),total=m*60+s;if(total<=0){min.focus();return}timers.push({id:id++,name:name.value.trim()||`計時器 ${id}`,total,remaining:total,running:false,done:false});name.value="";render()}
-$("#add").addEventListener("click",addTimer);[name,min,sec].forEach(e=>e.addEventListener("keydown",x=>{if(x.key==="Enter")addTimer()}));
-list.addEventListener("click",e=>{const c=e.target.closest(".card");if(!c)return;const t=timers.find(x=>x.id==c.dataset.id);if(!t)return;
-if(e.target.closest(".remove")){timers=timers.filter(x=>x!==t);render()}else if(e.target.closest(".reset")){t.remaining=t.total;t.running=false;t.done=false;render()}else if(e.target.closest(".toggle")){if(t.done){t.remaining=t.total;t.done=false}t.running=!t.running;render()}});
-function tick(now){const dt=Math.min(.25,(now-last)/1000);last=now;let changed=false;timers.forEach(t=>{if(t.running&&!t.done){t.remaining-=dt;changed=true;if(t.remaining<=0){t.remaining=0;t.running=false;t.done=true;try{navigator.vibrate?.([250,120,250])}catch(e){}}}});if(changed)render();requestAnimationFrame(tick)}
-render();requestAnimationFrame(tick);
+
+function render(){
+  empty.style.display=timers.length?"none":"block";
+  list.innerHTML=timers.map(t=>`
+    <article class="card" data-id="${t.id}">
+      <div class="head"><div class="name">${esc(t.name)}</div><button class="danger remove">刪除</button></div>
+      <div class="time">${fmt(t.remaining)}</div>
+      <div class="status">${t.done?"時間到":t.running?"倒數中…":"已暫停"}</div>
+      <div class="actions">
+        <button class="primary toggle">${t.running?"暫停":"開始"}</button>
+        <button class="reset">重設</button>
+      </div>
+    </article>`).join("");
+}
+
+function showNotice(text){
+  notice.textContent=text;
+  notice.classList.add("show");
+  clearTimeout(noticeTimer);
+  noticeTimer=setTimeout(()=>notice.classList.remove("show"),8000);
+}
+
+function ensureAudio(){
+  try{
+    if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    if(audioCtx.state==="suspended") audioCtx.resume();
+  }catch(e){}
+}
+
+function beep(){
+  try{
+    ensureAudio();
+    if(!audioCtx)return;
+    const now=audioCtx.currentTime;
+    [0,0.28,0.56].forEach((offset,i)=>{
+      const osc=audioCtx.createOscillator();
+      const gain=audioCtx.createGain();
+      osc.type="sine";
+      osc.frequency.value=i===1?880:660;
+      gain.gain.setValueAtTime(0.0001,now+offset);
+      gain.gain.exponentialRampToValueAtTime(0.22,now+offset+0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001,now+offset+0.20);
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.start(now+offset); osc.stop(now+offset+0.21);
+    });
+  }catch(e){}
+}
+
+async function enableNotification(){
+  try{
+    if("Notification" in window && Notification.permission==="default"){
+      await Notification.requestPermission();
+    }
+  }catch(e){}
+}
+
+function notifyDone(t){
+  try{navigator.vibrate?.([300,120,300,120,500])}catch(e){}
+  beep();
+  showNotice(`⏰「${t.name}」時間到了！`);
+  try{
+    if("Notification" in window && Notification.permission==="granted"){
+      new Notification("多重計時器｜時間到",{
+        body:`「${t.name}」已完成。`,
+        tag:`timer-${t.id}`,
+        requireInteraction:true
+      });
+    }
+  }catch(e){}
+}
+
+function addTimer(){
+  const m=Math.max(0,Math.min(999,Number(min.value)||0));
+  const s=Math.max(0,Math.min(59,Number(sec.value)||0));
+  const total=m*60+s;
+  if(total<=0){min.focus();return}
+  ensureAudio();
+  enableNotification();
+  timers.push({
+    id:id++,
+    name:name.value.trim()||`計時器 ${id-1}`,
+    total,remaining:total,running:false,done:false
+  });
+  name.value="";
+  render();
+}
+
+$("#add").addEventListener("click",addTimer);
+[name,min,sec].forEach(e=>e.addEventListener("keydown",x=>{if(x.key==="Enter")addTimer()}));
+
+list.addEventListener("click",e=>{
+  const c=e.target.closest(".card"); if(!c)return;
+  const t=timers.find(x=>x.id==c.dataset.id); if(!t)return;
+
+  if(e.target.closest(".remove")){
+    timers=timers.filter(x=>x!==t); render();
+  }else if(e.target.closest(".reset")){
+    ensureAudio();
+    t.remaining=t.total;t.running=false;t.done=false;render();
+  }else if(e.target.closest(".toggle")){
+    ensureAudio(); enableNotification();
+    if(t.done){t.remaining=t.total;t.done=false}
+    t.running=!t.running; render();
+  }
+});
+
+function tick(now){
+  const dt=Math.min(.25,(now-last)/1000);
+  last=now;
+  let changed=false;
+  timers.forEach(t=>{
+    if(t.running&&!t.done){
+      t.remaining-=dt;changed=true;
+      if(t.remaining<=0){
+        t.remaining=0;t.running=false;t.done=true;
+        notifyDone(t);
+      }
+    }
+  });
+  if(changed)render();
+  requestAnimationFrame(tick);
+}
+
+document.addEventListener("visibilitychange",()=>{
+  // Re-sync timing after returning from another app/tab.
+  last=performance.now();
+});
+
+render();
+requestAnimationFrame(tick);
+
 if("serviceWorker"in navigator)navigator.serviceWorker.register("sw.js").catch(()=>{});
 })();
 </script>
